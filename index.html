@@ -64,15 +64,15 @@ function fmtDate(iso){
   if(days<14) return "last week";
   return d.toLocaleDateString(undefined,{month:"short",day:"numeric"});
 }
-function staleness(iso){
+function staleness(iso, y, r){
   if(!iso) return null;
   const days=Math.floor((Date.now()-new Date(iso))/86400000);
-  if(days>5) return {level:"overdue",days};
-  if(days>3) return {level:"due",days};
+  if(days>r) return {level:"overdue",days};
+  if(days>y) return {level:"due",days};
   return {level:"fresh",days};
 }
 
-const DEF = { sets:3, reps:8 };
+const DEF = { sets:3, reps:8, rest:90, yellowDays:3, redDays:5 };
 function load(){
   try{ const raw=localStorage.getItem(STORAGE_KEY); if(raw){ const p=JSON.parse(raw);
     return { unit:p.unit||"lbs", exercises:p.exercises||[], defaults:{...DEF, ...(p.defaults||{})} }; } }catch(e){}
@@ -127,14 +127,14 @@ function App(){
           </div>
         </header>
 
-        <RestTimer />
+        <RestTimer duration={data.defaults.rest} />
 
         {data.exercises.length===0 ? (
           <EmptyState onAdd={()=>setAdding(true)} onQuick={addExercise}/>
         ) : (
           <div style={S.list}>
             {data.exercises.map((ex,i)=>(
-              <ExerciseCard key={ex.id} ex={ex} unit={data.unit} index={i}
+              <ExerciseCard key={ex.id} ex={ex} unit={data.unit} index={i} defaults={data.defaults}
                 onLog={()=>setLogging(ex.id)} onHistory={()=>setHistoryFor(ex.id)}
                 onRemove={()=>removeExercise(ex.id)}/>
             ))}
@@ -151,9 +151,8 @@ function App(){
   );
 }
 
-function RestTimer(){
-  const DURATION=90;
-  const [secs,setSecs]=useState(DURATION);
+function RestTimer({duration}){
+  const [secs,setSecs]=useState(duration);
   const [running,setRunning]=useState(false);
   const [done,setDone]=useState(false);
   const endRef=useRef(0), ctxRef=useRef(null), firedRef=useRef(false);
@@ -166,6 +165,8 @@ function RestTimer(){
     },250);
     return ()=>clearInterval(id);
   },[running]);
+
+  useEffect(()=>{ if(!running){ setSecs(duration); setDone(false); } },[duration]);
 
   useEffect(()=>{
     if(running && secs===0 && !firedRef.current){
@@ -196,14 +197,14 @@ function RestTimer(){
 
   const onTap=()=>{
     unlock();
-    if(running){ setRunning(false); setSecs(DURATION); setDone(false); firedRef.current=false; }
-    else { firedRef.current=false; setDone(false); setSecs(DURATION);
-      endRef.current=Date.now()+DURATION*1000; setRunning(true); }
+    if(running){ setRunning(false); setSecs(duration); setDone(false); firedRef.current=false; }
+    else { firedRef.current=false; setDone(false); setSecs(duration);
+      endRef.current=Date.now()+duration*1000; setRunning(true); }
   };
 
   const mm=Math.floor(secs/60), ss=secs%60;
   const timeStr=mm+":"+String(ss).padStart(2,"0");
-  const pct=running?(secs/DURATION)*100:done?0:100;
+  const pct=running?(secs/duration)*100:done?0:100;
   const cta=running?"RESET":done?"GO AGAIN":"START";
   const timeColor=running?"var(--accent)":done?"var(--accent2)":"var(--ink)";
 
@@ -217,9 +218,9 @@ function RestTimer(){
   );
 }
 
-function ExerciseCard({ex,unit,index,onLog,onHistory,onRemove}){
+function ExerciseCard({ex,unit,index,defaults,onLog,onHistory,onRemove}){
   const last=ex.history[0];
-  const st=last?staleness(last.date):null;
+  const st=last?staleness(last.date, defaults.yellowDays, defaults.redDays):null;
   const tint=st&&st.level!=="fresh"?S.cardTint[st.level]:null;
   const warnColor=st&&st.level==="overdue"?"#ff7a5c":st&&st.level==="due"?"#ffcf5a":"var(--dim)";
   const tag=st&&st.level==="overdue"?"OVERDUE":st&&st.level==="due"?"DUE":null;
@@ -277,14 +278,16 @@ function LogModal({ex,unit,defaults,onClose,onSave}){
   );
 }
 
-function Stepper({label,value,onMinus,onPlus,onChange,big}){
+function Stepper({label,value,onMinus,onPlus,onChange,big,fmt}){
   return (
     <div style={{marginBottom:16}}>
       <div style={S.stepperLabel}>{label}</div>
       <div style={S.stepperRow}>
         <button style={S.stepBtn} onClick={onMinus}>−</button>
-        <input style={{...S.stepInput, fontSize:big?38:26}} value={value} inputMode="decimal"
-          onChange={(e)=>onChange(e.target.value.replace(/[^0-9.]/g,""))}/>
+        {fmt
+          ? <div style={{...S.stepInput, fontSize:big?38:26, display:"flex", alignItems:"center", justifyContent:"center"}}>{fmt(value)}</div>
+          : <input style={{...S.stepInput, fontSize:big?38:26}} value={value} inputMode="decimal"
+              onChange={(e)=>onChange(e.target.value.replace(/[^0-9.]/g,""))}/>}
         <button style={S.stepBtn} onClick={onPlus}>+</button>
       </div>
     </div>
@@ -322,17 +325,41 @@ function HistoryModal({ex,unit,onClose,onDelete}){
 function SettingsModal({defaults,onClose,onSave}){
   const [sets,setSets]=useState(String(defaults.sets));
   const [reps,setReps]=useState(String(defaults.reps));
+  const [rest,setRest]=useState(String(defaults.rest));
+  const [yellow,setYellow]=useState(String(defaults.yellowDays));
+  const [red,setRed]=useState(String(defaults.redDays));
   const step=(setter,val,delta,min=1)=>setter(String(Math.max(min,(parseInt(val)||0)+delta)));
+  const fmtTime=(v)=>{ const s=parseInt(v)||0; return Math.floor(s/60)+":"+String(s%60).padStart(2,"0"); };
+  const save=()=>{
+    const y=Math.max(1, parseInt(yellow)||1);
+    const r=Math.max(y, parseInt(red)||y);
+    onSave({ sets:parseInt(sets)||1, reps:parseInt(reps)||1, rest:Math.max(15, parseInt(rest)||90), yellowDays:y, redDays:r });
+  };
   return (
     <Modal onClose={onClose}>
       <div style={S.modalKicker}>SETTINGS</div>
-      <h2 style={S.modalTitle}>Default sets &amp; reps</h2>
-      <div style={S.lastHint}>These pre-fill the log form when you train an exercise for the first time.</div>
+      <h2 style={S.modalTitle}>Settings</h2>
+
+      <div style={S.settingSection}>DEFAULT SETS &amp; REPS</div>
+      <div style={S.lastHint}>Pre-fill the log form for a brand-new exercise.</div>
       <div style={S.twoCol}>
-        <Stepper label="Default sets" value={sets} onMinus={()=>step(setSets,sets,-1)} onPlus={()=>step(setSets,sets,1)} onChange={setSets}/>
-        <Stepper label="Default reps" value={reps} onMinus={()=>step(setReps,reps,-1)} onPlus={()=>step(setReps,reps,1)} onChange={setReps}/>
+        <Stepper label="Sets" value={sets} onMinus={()=>step(setSets,sets,-1)} onPlus={()=>step(setSets,sets,1)} onChange={setSets}/>
+        <Stepper label="Reps" value={reps} onMinus={()=>step(setReps,reps,-1)} onPlus={()=>step(setReps,reps,1)} onChange={setReps}/>
       </div>
-      <button style={S.saveBtn} onClick={()=>onSave({sets:parseInt(sets)||1, reps:parseInt(reps)||1})}>SAVE DEFAULTS</button>
+
+      <div style={S.settingSection}>REST TIMER</div>
+      <div style={S.lastHint}>How long the countdown runs. Steps of 15 seconds.</div>
+      <Stepper label="Countdown (min:sec)" value={rest} fmt={fmtTime}
+        onMinus={()=>step(setRest,rest,-15,15)} onPlus={()=>step(setRest,rest,15,15)} onChange={setRest}/>
+
+      <div style={S.settingSection}>OVERDUE COLORS</div>
+      <div style={S.lastHint}>Days since last done before a card turns amber, then red.</div>
+      <div style={S.twoCol}>
+        <Stepper label="Amber after (days)" value={yellow} onMinus={()=>step(setYellow,yellow,-1)} onPlus={()=>step(setYellow,yellow,1)} onChange={setYellow}/>
+        <Stepper label="Red after (days)" value={red} onMinus={()=>step(setRed,red,-1)} onPlus={()=>step(setRed,red,1)} onChange={setRed}/>
+      </div>
+
+      <button style={S.saveBtn} onClick={save}>SAVE SETTINGS</button>
     </Modal>
   );
 }
@@ -419,6 +446,7 @@ const S = {
   modal:{background:"var(--panel)",width:"100%",maxWidth:480,borderRadius:"22px 22px 0 0",padding:"30px 22px calc(34px + env(safe-area-inset-bottom))",border:"1px solid var(--line)",position:"relative",maxHeight:"90vh",overflowY:"auto"},
   closeX:{position:"absolute",top:16,right:16,background:"var(--panel2)",color:"var(--dim)",width:32,height:32,borderRadius:10,fontSize:13},
   modalKicker:{fontSize:11,letterSpacing:3,color:"var(--accent)",fontWeight:700},
+  settingSection:{fontSize:11,letterSpacing:2,color:"var(--accent)",fontWeight:800,marginTop:18,marginBottom:2},
   modalTitle:{fontFamily:"'Bebas Neue',sans-serif",fontSize:34,margin:"2px 0 6px",letterSpacing:0.5},
   lastHint:{fontSize:13,color:"var(--dim)",marginBottom:18},
   stepperLabel:{fontSize:11,letterSpacing:2,color:"var(--dim)",fontWeight:700,marginBottom:6},
